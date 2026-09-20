@@ -98,15 +98,25 @@ docker compose up --build
       分母为零时 τ-b 返回 `null`（如某一轮全部候选并列）。
     - 报告接口为**纯只读**：只做查询与内存计算，**不修改任一会话**的候选、停用名单、
       判断记录与沙盘草稿；也不新增任何数据表。
+14. **评审快照**：评审页工具栏点击「📸 下载评审快照」，即可把当前会话下载为一个 JSON 文件
+    （文件名形如 `snapshot_<会话ID>_<哈希前12位>.json`）。快照为**纯只读**导出：
+    - 文件内含 `payload` 与 `snapshot_sha256` 两部分；`payload` 包含**全部候选及停用状态**
+      （保留最初录入顺序）、**按判断记录顺序**排列的逐对结果（涉及停用候选的记录同样
+      完整保留，带从 1 起的 `seq` 序号）、进度、**Schulze 排名**与**循环冲突**信息；
+    - `payload` 按**固定字段顺序**、以 **UTF-8、紧凑无空白** JSON 规范化序列化，
+      `snapshot_sha256` 即该规范串的 SHA-256；可用任何语言按同一规范重算哈希校验完整性；
+    - 接口为 `GET /api/sessions/{id}/snapshot`，直接在浏览器或 `curl` 中打开同样可获取，
+      下载不改变会话的任何数据。
 
 ## 🚀 快速入口
 
 | 项目 | 地址 / 命令 |
 | ---- | ---- |
 | 一键启动（唯一命令） | `docker compose up --build` |
-| 网页（评审台 / 情景沙盘 / 会话对照报告入口） | <http://localhost:8000> |
+| 网页（评审台 / 情景沙盘 / 会话对照报告 / 评审快照入口） | <http://localhost:8000> |
 | API 文档（Swagger） | <http://localhost:8000/docs> |
 | 会话对照报告 API | `GET /api/sessions/{当前会话ID}/comparison?other_session_id={另一会话ID}` |
+| 评审快照 API | `GET /api/sessions/{当前会话ID}/snapshot` |
 
 服务监听容器内 **8000** 端口，默认映射到宿主机 **8000** 端口。
 
@@ -152,6 +162,41 @@ docker compose up --build
   仅一侧并列（含 `tied_in_a_only` / `tied_in_b_only` 分项）、两侧均并列计数。
 - 接口 `GET /api/sessions/{id}/comparison?other_session_id=...` 为**纯只读**：
   不写库、不改变两会话的任何数据，也不新增数据表或迁移；刷新或关闭弹层无副作用。
+
+## 📸 评审快照（可校验的只读导出）
+
+- **入口**：评审页工具栏「📸 下载评审快照」按钮（浏览器下载 JSON 文件，文件名
+  `snapshot_<会话ID>_<snapshot_sha256前12位>.json`）；也可直接访问
+  `GET /api/sessions/{id}/snapshot`（如粘贴到浏览器、用 `curl -O` 保存）。
+- **快照内容**（`payload`，字段顺序固定）：
+  - `session_id`：会话 ID；`generated_at`：快照生成时间（UTC，`YYYY-MM-DDTHH:MM:SSZ`）；
+  - `candidates`：**全部候选及停用状态**，每项 `{"name","disabled"}`，始终保留
+    **最初录入顺序**（停用候选仍在列，不删任何判断记录）；
+  - `judgments`：**按判断记录顺序（记录 id 升序）**的逐对结果，每项
+    `{"seq","a","b","result"}`：`seq` 从 1 起；`a`/`b` 按候选录入序排列；
+    `result` 相对存储顺序的 `a`——`"a"` a 胜、`"b"` b 胜、`"tie"` 平局；
+    **涉及停用候选的记录同样完整保留**；
+  - `progress`：进度 `{"done","total"}`，只统计双方均启用的组合（与评审页一致）；
+  - `ranking`：Schulze 排名（有序并列组，同组按录入序），只按启用候选计算；
+  - `conflict`：循环冲突信息（严格胜负最短有向环 `cycle` 及环上 `edges`），
+    无冲突时为 `null`。
+- **规范化与校验**：`payload` 以 `json.dumps(..., ensure_ascii=False,
+  separators=(",", ":"))` 序列化为 **UTF-8、无任何多余空白**的字节串，
+  `snapshot_sha256` 为其 SHA-256（十六进制）。响应整体为同规范的紧凑 JSON：
+  `{"payload":{...},"snapshot_sha256":"..."}`，前端把响应字节**原样落盘**，
+  故文件与接口返回逐字节一致。任何一方按下列 Python 片段即可离线校验：
+
+  ```python
+  import hashlib, json
+  doc = json.load(open("snapshot_xxx.json", encoding="utf-8"))
+  canonical = json.dumps(doc["payload"], ensure_ascii=False,
+                         separators=(",", ":")).encode("utf-8")
+  assert hashlib.sha256(canonical).hexdigest() == doc["snapshot_sha256"]
+  ```
+
+- 接口为**纯只读**：只执行 SELECT 与内存计算，不写库、不改变候选 / 停用名单 /
+  判断记录 / 沙盘草稿，也不新增数据表或迁移；重复下载得到的差异仅在
+  `generated_at`（与因此产生的哈希）。
 
 ## 🧮 排名算法
 
@@ -241,6 +286,7 @@ Schulze 最强路径法：路径强度为路径上最弱一环，最强路径取
 | GET | `/api/sessions/{id}` | 获取完整状态（进度、当前对、排名、矩阵、待比较组合、循环冲突、最少改判建议、下一对推荐、停用名单、`has_sandbox` 草稿标记） |
 | GET | `/api/sessions/{id}/comparison?other_session_id=X` | 「会话对照报告」：仅当两会话启用候选名称集合相同且均已完成时，返回逐条判断四类差异统计/明细与两轮最终排名的 Kendall τ-b（分母为 0 时 `value=null`）；纯只读，不修改任一会话 |
 | GET | `/api/sessions/{id}/ranking-basis?a=X&b=Y` | 「排名依据」：X/Y 双向最强路径（节点链、各边类型与强度、瓶颈强度、边数）与领先/落后/并列判定；纯只读 |
+| GET | `/api/sessions/{id}/snapshot` | 「评审快照」：返回 `{"payload", "snapshot_sha256"}`；payload 含全部候选及停用状态、按记录顺序的逐对结果、进度、Schulze 排名与冲突信息，按固定字段顺序 UTF-8 紧凑序列化；纯只读 |
 | POST | `/api/sessions/{id}/judgments` | 记录判断（body: `{"a","b","result": "a"\|"b"\|"tie"}`）；接受当前对或任意待比较组合（用于推荐跳转） |
 | PUT | `/api/sessions/{id}/judgments` | 复核修改：原位替换一条已判定组合的结果（body 同上），进度不变 |
 | POST | `/api/sessions/{id}/resolve-conflicts` | 一次确认批量应用最少改判方案：单事务把建议组合改为平局，重算排名与冲突 |

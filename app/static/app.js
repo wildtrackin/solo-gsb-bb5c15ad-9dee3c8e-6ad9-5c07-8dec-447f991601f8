@@ -1395,6 +1395,47 @@ async function copyCurrentSessionId() {
   }
 }
 
+/* ---------- 评审快照 ---------- */
+
+async function downloadSnapshot() {
+  if (busy || !state) return;
+  const btn = $("#snapshot-btn");
+  btn.disabled = true;
+  try {
+    // 直接获取服务端规范化 JSON（payload + snapshot_sha256），原样落盘，
+    // 下载文件与服务端响应逐字节一致，可按文件内 payload 重算 SHA-256 校验。
+    const res = await fetch(`/api/sessions/${state.session_id}/snapshot`);
+    if (!res.ok) {
+      let detail = `请求失败（${res.status}）`;
+      try {
+        const body = await res.json();
+        if (body.detail) detail = body.detail;
+      } catch (_) { /* 忽略非 JSON 响应 */ }
+      throw new Error(detail);
+    }
+    const raw = await res.text();
+    let digest = "";
+    try {
+      digest = JSON.parse(raw).snapshot_sha256 || "";
+    } catch (_) { /* 兜底：无法解析时文件名不带哈希片段 */ }
+
+    const blob = new Blob([raw], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `snapshot_${state.session_id}${digest ? "_" + digest.slice(0, 12) : ""}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(digest ? `评审快照已下载（SHA-256：${digest.slice(0, 12)}…）` : "评审快照已下载");
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* ---------- 数据操作 ---------- */
 
 function stateChanged() {
@@ -1580,6 +1621,7 @@ $("#nextpair-jump").addEventListener("click", jumpToRecommended);
 $("#basis-close").addEventListener("click", clearBasis);
 $("#sandbox-open-btn").addEventListener("click", openSandbox);
 $("#compare-open-btn").addEventListener("click", openComparison);
+$("#snapshot-btn").addEventListener("click", downloadSnapshot);
 $("#compare-close").addEventListener("click", closeComparison);
 $("#compare-run-btn").addEventListener("click", runComparison);
 $("#compare-copy-a").addEventListener("click", copyCurrentSessionId);

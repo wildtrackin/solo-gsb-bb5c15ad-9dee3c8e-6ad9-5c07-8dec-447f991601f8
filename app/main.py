@@ -5,17 +5,19 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -945,6 +947,80 @@ def compare_sessions(sid: str, other_session_id: str | None = None):
 
         return build_comparison(
             sid, candidates_a, history_a, other, candidates_b, history_b
+        )
+    finally:
+        conn.close()
+
+
+# ---------- 评审快照 ----------
+
+def canonical_json(obj: object) -> bytes:
+    """评审快照的规范化序列化：UTF-8、紧凑无空白、不转义非 ASCII。
+
+    字段顺序完全由组装 dict 时的插入顺序（Python 保序）决定，故同一状态
+    永远得到逐字节一致的输出，snapshot_sha256 可离线复算校验。
+    """
+    return json.dumps(
+        obj, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+@app.get("/api/sessions/{sid}/snapshot")
+def session_snapshot(sid: str):
+    """评审快照：把当前会话状态组装为可归档、可校验完整性的 JSON。
+
+    payload 包含：会话 ID 与生成时间、**全部候选及停用状态**（保留最初
+    录入顺序）、**按判断记录顺序**的逐对结果（涉及停用候选的记录同样
+    完整保留）、进度、Schulze 排名与循环冲突信息。排名 / 进度 / 冲突
+    与评审页一致，只按启用候选计算。
+
+    payload 按固定字段顺序以 UTF-8、紧凑无空白规范化序列化，
+    snapshot_sha256 为其 SHA-256（十六进制）。响应本身即同样式的
+    紧凑 JSON（先 payload 后 snapshot_sha256），前端可原样下载，
+    任何一方按同一规范重算 payload 哈希即可校验。纯只读，不写库。
+    """
+    conn = get_conn()
+    try:
+        all_candidates, disabled_set, all_history = _load_rows(conn, sid)
+        enabled = set(all_candidates) - disabled_set
+        candidates = [name for name in all_candidates if name in enabled]
+        history = [
+            h for h in all_history if h["a"] in enabled and h["b"] in enabled
+        ]
+        # 排名 / 进度 / 冲突只取启用候选口径（与评审页状态一致）；快照不需要矩阵
+        view = compute_view(candidates, history)
+        payload = {
+            "session_id": sid,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # 全部候选（最初录入顺序）；disabled 标记停用状态，停用不删除任何记录
+            "candidates": [
+                {"name": name, "disabled": name in disabled_set}
+                for name in all_candidates
+            ],
+            # 逐对结果按判断记录 id 顺序（涉及停用候选的记录同样保留，seq 从 1 起）
+            "judgments": [
+                {
+                    "seq": i + 1,
+                    "a": h["a"],
+                    "b": h["b"],
+                    # 相对存储顺序（候选录入序在前）的 a：a/b 为胜负，tie 为平局
+                    "result": h["result"],
+                }
+                for i, h in enumerate(all_history)
+            ],
+            # 进度只统计双方均启用的组合（与评审页一致）
+            "progress": view["progress"],
+            # Schulze 排名：有序并列组，同组候选以录入序排列
+            "ranking": view["ranking"],
+            # 循环冲突：严格胜负最短有向环（环上候选序列与各组合），无冲突为 null
+            "conflict": view["conflict"],
+        }
+        payload_bytes = canonical_json(payload)
+        digest = hashlib.sha256(payload_bytes).hexdigest()
+        envelope = {"payload": payload, "snapshot_sha256": digest}
+        return Response(
+            content=canonical_json(envelope),
+            media_type="application/json; charset=utf-8",
         )
     finally:
         conn.close()
