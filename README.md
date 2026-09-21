@@ -98,15 +98,20 @@ docker compose up --build
       分母为零时 τ-b 返回 `null`（如某一轮全部候选并列）。
     - 报告接口为**纯只读**：只做查询与内存计算，**不修改任一会话**的候选、停用名单、
       判断记录与沙盘草稿；也不新增任何数据表。
+14. **评审快照**：工具栏点击「📥 评审快照」即可下载当前会话的 JSON 快照文件
+    （`评审快照-{会话ID}.json`，端口仍为 `8000`）。快照包含全部候选及停用状态、
+    按判断记录顺序的逐对结果、进度、Schulze 排名与循环冲突信息，并附
+    `snapshot_sha256` 完整性哈希；生成为纯只读，不影响任何评审数据。
 
 ## 🚀 快速入口
 
 | 项目 | 地址 / 命令 |
 | ---- | ---- |
 | 一键启动（唯一命令） | `docker compose up --build` |
-| 网页（评审台 / 情景沙盘 / 会话对照报告入口） | <http://localhost:8000> |
+| 网页（评审台 / 情景沙盘 / 会话对照报告 / 评审快照入口） | <http://localhost:8000> |
 | API 文档（Swagger） | <http://localhost:8000/docs> |
 | 会话对照报告 API | `GET /api/sessions/{当前会话ID}/comparison?other_session_id={另一会话ID}` |
+| 评审快照 API | `GET /api/sessions/{会话ID}/snapshot` |
 
 服务监听容器内 **8000** 端口，默认映射到宿主机 **8000** 端口。
 
@@ -152,6 +157,38 @@ docker compose up --build
   仅一侧并列（含 `tied_in_a_only` / `tied_in_b_only` 分项）、两侧均并列计数。
 - 接口 `GET /api/sessions/{id}/comparison?other_session_id=...` 为**纯只读**：
   不写库、不改变两会话的任何数据，也不新增数据表或迁移；刷新或关闭弹层无副作用。
+
+## 📦 评审快照（可校验归档）
+
+- **入口**：评审页工具栏「📥 评审快照」按钮，直接下载 `评审快照-{会话ID}.json`
+  （端口仍为 `8000`）；也可调用 `GET /api/sessions/{id}/snapshot` 获取同样内容。
+- **快照内容**（`payload`，字段顺序固定）：
+  - `schema` / `session_id` / `created_at`：格式版本、会话标识与创建时间（取自数据库）；
+  - `candidates` / `disabled`：全部候选（最初录入顺序）与停用名单（同序）；
+  - `judgments`：全部判断记录按记录 id 顺序（含涉及停用候选的记录；组合按候选
+    录入顺序存储，`result` 相对存储顺序的 `a` 解释）；
+  - `progress` / `ranking` / `conflict`：与状态接口同一口径的进度、Schulze 排名
+    （有序并列组）与循环冲突信息（无冲突时为 `null`），只按启用候选计算。
+- **规范序列化与哈希**：`payload` 按固定字段顺序、UTF-8、无空白
+  （`json.dumps(..., ensure_ascii=False, separators=(",", ":"))`）序列化，对其
+  UTF-8 字节计算 SHA-256 即 `snapshot_sha256`。同一会话状态无论何时请求，
+  payload 与哈希逐位一致；接口响应与下载文件均为
+  `{"payload": ..., "snapshot_sha256": ...}`。
+- **校验方法**：解析文件取出 `payload`，按同一规范重新序列化并计算 SHA-256，
+  与 `snapshot_sha256` 比对即可确认快照完整未被篡改，例如：
+
+  ```bash
+  python3 -c '
+  import hashlib, json, sys
+  doc = json.load(open(sys.argv[1], encoding="utf-8"))
+  canon = json.dumps(doc["payload"], ensure_ascii=False, separators=(",", ":"))
+  digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+  print("OK" if digest == doc["snapshot_sha256"] else "MISMATCH", digest)
+  ' 评审快照-xxxx.json
+  ```
+
+- 接口为**纯只读**：只执行查询与内存计算，不写库、不新增数据表，
+  不影响任何现有接口的字段与行为。
 
 ## 🧮 排名算法
 
@@ -241,6 +278,7 @@ Schulze 最强路径法：路径强度为路径上最弱一环，最强路径取
 | GET | `/api/sessions/{id}` | 获取完整状态（进度、当前对、排名、矩阵、待比较组合、循环冲突、最少改判建议、下一对推荐、停用名单、`has_sandbox` 草稿标记） |
 | GET | `/api/sessions/{id}/comparison?other_session_id=X` | 「会话对照报告」：仅当两会话启用候选名称集合相同且均已完成时，返回逐条判断四类差异统计/明细与两轮最终排名的 Kendall τ-b（分母为 0 时 `value=null`）；纯只读，不修改任一会话 |
 | GET | `/api/sessions/{id}/ranking-basis?a=X&b=Y` | 「排名依据」：X/Y 双向最强路径（节点链、各边类型与强度、瓶颈强度、边数）与领先/落后/并列判定；纯只读 |
+| GET | `/api/sessions/{id}/snapshot` | 「评审快照」：返回 `{"payload", "snapshot_sha256"}`——payload 含全部候选与停用名单、按判断记录顺序的逐对结果、进度、Schulze 排名与冲突信息，按固定字段顺序、UTF-8 无空白规范序列化并附 SHA-256；纯只读 |
 | POST | `/api/sessions/{id}/judgments` | 记录判断（body: `{"a","b","result": "a"\|"b"\|"tie"}`）；接受当前对或任意待比较组合（用于推荐跳转） |
 | PUT | `/api/sessions/{id}/judgments` | 复核修改：原位替换一条已判定组合的结果（body 同上），进度不变 |
 | POST | `/api/sessions/{id}/resolve-conflicts` | 一次确认批量应用最少改判方案：单事务把建议组合改为平局，重算排名与冲突 |
@@ -263,6 +301,7 @@ Schulze 最强路径法：路径强度为路径上最弱一环，最强路径取
 │   ├── conflict.py      # 严格胜负图中的最短有向环检测
 │   ├── priority.py      # 下一对优先级推荐（三结果模拟 + 影响分）
 │   ├── compare.py       # 会话对照报告：判断归一化、四类差异、含并列修正 Kendall τ-b
+│   ├── snapshot.py      # 评审快照：固定字段顺序组装 + UTF-8 无空白规范序列化 + SHA-256
 │   └── static/          # 前端（index.html / style.css / app.js）
 ├── requirements.txt
 ├── Dockerfile

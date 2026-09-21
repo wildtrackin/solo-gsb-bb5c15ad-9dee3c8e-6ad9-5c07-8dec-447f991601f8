@@ -24,6 +24,7 @@ from .conflict import minimum_tie_resolution, shortest_cycle
 from .paths import pair_explanation
 from .priority import recommend_next_pair
 from .schulze import rank_groups, strongest_paths
+from .snapshot import build_snapshot, snapshot_sha256
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -946,6 +947,51 @@ def compare_sessions(sid: str, other_session_id: str | None = None):
         return build_comparison(
             sid, candidates_a, history_a, other, candidates_b, history_b
         )
+    finally:
+        conn.close()
+
+
+# ---------- 评审快照 ----------
+
+@app.get("/api/sessions/{sid}/snapshot")
+def get_snapshot(sid: str):
+    """评审快照：把会话当前状态组装为可归档、可校验的 JSON 并附 SHA-256。
+
+    快照 payload 包含：全部候选（最初录入顺序）与停用名单、按判断记录
+    顺序的逐对结果（含涉及停用候选的记录）、进度、Schulze 排名与循环冲突
+    信息（派生结果与状态接口同一口径，只按启用候选计算）。
+
+    payload 按固定字段顺序、UTF-8、无空白规范序列化，对其字节计算
+    SHA-256 得到 ``snapshot_sha256`` 一并返回；同一状态无论何时请求，
+    payload 与哈希逐位一致。纯只读接口：只执行 SELECT，不写库、不影响任何
+    现有接口。前端下载的 JSON 文件即 ``{"payload": ..., "snapshot_sha256": ...}``。
+    """
+    conn = get_conn()
+    try:
+        all_candidates, disabled_set, all_history = _load_rows(conn, sid)
+        created_at = conn.execute(
+            "SELECT created_at FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()["created_at"]
+
+        # 派生结果（进度 / 排名 / 冲突）与状态接口同一口径：只按启用候选计算
+        candidates = [name for name in all_candidates if name not in disabled_set]
+        enabled = set(candidates)
+        history = [
+            h for h in all_history if h["a"] in enabled and h["b"] in enabled
+        ]
+        view = compute_view(candidates, history)
+
+        payload = build_snapshot(
+            session_id=sid,
+            created_at=created_at,
+            all_candidates=all_candidates,
+            disabled=[name for name in all_candidates if name in disabled_set],
+            judgments=all_history,
+            progress=view["progress"],
+            ranking=view["ranking"],
+            conflict=view["conflict"],
+        )
+        return {"payload": payload, "snapshot_sha256": snapshot_sha256(payload)}
     finally:
         conn.close()
 

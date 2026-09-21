@@ -745,6 +745,13 @@ button.compare-entry {
 }
 button.compare-entry:hover:not(:disabled) { background: rgba(111, 224, 214, 0.14); }
 
+/* ---------- 评审快照 ---------- */
+button.snapshot-entry {
+  color: #8be0b2;
+  border-color: rgba(62, 207, 142, 0.5);
+}
+button.snapshot-entry:hover:not(:disabled) { background: rgba(62, 207, 142, 0.14); }
+
 .compare-overlay {
   position: fixed;
   inset: 0;

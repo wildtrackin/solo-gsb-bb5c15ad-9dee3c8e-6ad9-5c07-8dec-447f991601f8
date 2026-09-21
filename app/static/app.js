@@ -1395,6 +1395,44 @@ async function copyCurrentSessionId() {
   }
 }
 
+/* ---------- 评审快照 ---------- */
+
+async function downloadSnapshot() {
+  // 下载评审快照：文件内容即服务端响应原文（{"payload": ..., "snapshot_sha256": ...}），
+  // payload 按固定字段顺序、UTF-8、无空白规范序列化，可用 snapshot_sha256 校验完整性。
+  if (!state) return;
+  const btn = $("#snapshot-btn");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/sessions/${state.session_id}/snapshot`);
+    if (!res.ok) {
+      let detail = `请求失败（${res.status}）`;
+      try {
+        const body = await res.json();
+        if (body.detail) detail = body.detail;
+      } catch (_) { /* 忽略非 JSON 响应 */ }
+      throw new Error(detail);
+    }
+    const text = await res.text(); // 原样落盘，保证与服务器生成的字节一致
+    const doc = JSON.parse(text);
+    const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `评审快照-${state.session_id}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast(`评审快照已下载（SHA-256 ${doc.snapshot_sha256.slice(0, 12)}…）`);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* ---------- 数据操作 ---------- */
 
 function stateChanged() {
@@ -1580,6 +1618,7 @@ $("#nextpair-jump").addEventListener("click", jumpToRecommended);
 $("#basis-close").addEventListener("click", clearBasis);
 $("#sandbox-open-btn").addEventListener("click", openSandbox);
 $("#compare-open-btn").addEventListener("click", openComparison);
+$("#snapshot-btn").addEventListener("click", downloadSnapshot);
 $("#compare-close").addEventListener("click", closeComparison);
 $("#compare-run-btn").addEventListener("click", runComparison);
 $("#compare-copy-a").addEventListener("click", copyCurrentSessionId);
